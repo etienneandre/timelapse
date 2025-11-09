@@ -8,6 +8,7 @@
 
 import os
 import sys
+import subprocess
 import shutil
 from datetime import datetime
 from PIL import Image
@@ -43,29 +44,7 @@ def extraire_date_exif(chemin_image):
         return None
 
 
-def main_renommage():
-    # Vérification des arguments
-    if len(sys.argv) < 2:
-        print("Usage : python script.py <repertoire_entree> [prefixe] [repertoire_sortie]")
-        sys.exit(1)
-
-    repertoire_entree = sys.argv[1]
-    prefixe = sys.argv[2] if len(sys.argv) >= 3 else "exif"
-
-    global repertoire_sortie
-    repertoire_sortie = sys.argv[3] if len(sys.argv) >= 4 else repertoire_entree.rstrip("/\\") + "-exif"
-
-    if not os.path.isdir(repertoire_entree):
-        print(f"Erreur : le répertoire d’entrée '{repertoire_entree}' n’existe pas.")
-        sys.exit(1)
-
-    print("\n=== Entrées ===")
-    print(f"Répertoire source    : {repertoire_entree}")
-    print(f"Préfixe              : {prefixe}")
-    print(f"Répertoire de sortie : {repertoire_sortie}")
-
-    os.makedirs(repertoire_sortie, exist_ok=True)
-
+def main_renommage(repertoire_entree, repertoire_sortie):
     # Extensions d’images prises en charge
     extensions_valides = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".heic", ".webp"}
 
@@ -108,8 +87,6 @@ def main_renommage():
 
 
 # === Réglages ===
-# VIDEO_NAME = "timelapse.mp4"
-# FPS = 24
 MAX_FEATURES = 5000
 RATIO_TEST = 0.75       # ratio pour knnMatch
 MIN_MATCH_COUNT = 8     # nombre minimal de correspondances fiables pour homographie
@@ -209,7 +186,7 @@ def main_alignement_old():
     # ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
 
     # === 4. Calcul du recadrage commun ===
-    print("[INFO] Calcul du cadrage commun (zone non noire)...")
+    print("[INFO] Calcul du cadrage commun (zone non noire)…")
     masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for _, img in aligned_images]
     common_mask = np.logical_and.reduce(masks).astype(np.uint8)
     ys, xs = np.where(common_mask)
@@ -218,7 +195,7 @@ def main_alignement_old():
     ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
 
     # === 5. Sauvegarde des images alignées ===
-    print("[INFO] Sauvegarde des images alignées...")
+    print("[INFO] Sauvegarde des images alignées…")
     for orig_path, img in aligned_images:
         filename = os.path.basename(orig_path)
         cropped = img[ymin:ymax+1, xmin:xmax+1]
@@ -252,7 +229,7 @@ def main_alignement():
         raise SystemExit(f"Aucune image trouvée dans {IMG_DIR}")
 
     # === 1. Calcul de l’image de référence moyenne ===
-    print(f"[INFO] Calcul de l’image moyenne à partir des {min(N_AVG, len(files))} premières images...")
+    print(f"[INFO] Calcul de l’image moyenne à partir des {min(N_AVG, len(files))} premières images…")
     subset = files[:N_AVG]
     imgs = []
     for f in subset:
@@ -308,7 +285,7 @@ def main_alignement():
         return im.copy(), np.eye(3, dtype=np.float32)
 
     # === 3. Alignement de toutes les images sur l’image moyenne ===
-    print(f"[INFO] Alignement de {len(files)} images sur la référence moyenne...")
+    print(f"[INFO] Alignement de {len(files)} images sur la référence moyenne…")
     aligned_images = []
     for f in tqdm(files, desc="Alignement"):
         im = cv2.imread(f)
@@ -316,7 +293,7 @@ def main_alignement():
         aligned_images.append((f, aligned))
 
     # === 4. Calcul du recadrage commun ===
-    print("[INFO] Calcul du cadrage commun (zone non noire)...")
+    print("[INFO] Calcul du cadrage commun (zone non noire)…")
     masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for _, img in aligned_images]
     common_mask = np.logical_and.reduce(masks).astype(np.uint8)
     ys, xs = np.where(common_mask)
@@ -325,7 +302,7 @@ def main_alignement():
     ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
 
     # === 5. Sauvegarde des images alignées ===
-    print("[INFO] Sauvegarde des images alignées...")
+    print("[INFO] Sauvegarde des images alignées…")
     for orig_path, img in aligned_images:
         filename = os.path.basename(orig_path)
         cropped = img[ymin:ymax+1, xmin:xmax+1]
@@ -487,25 +464,106 @@ def align_folder_3(input_dir, output_dir):
 
     print(f"\n✅ Toutes les images ont été alignées dans : {output_dir}")
 
-def main_alignement_3():
-    IMG_DIR = repertoire_sortie
-    OUTPUT_DIR = IMG_DIR + "-alignes"
+# def main_alignement_3(repertoire_sortie_exif, repertoire_sortie_exif_aligne):
+#     # import argparse
+#     # parser = argparse.ArgumentParser(description="Aligne les images d'un dossier pour timelapse.")
+#     # parser.add_argument("input_dir", help="Dossier contenant les images originales")
+#     # parser.add_argument("output_dir", help="Dossier où sauvegarder les images alignées")
+#     # args = parser.parse_args()
+#     # align_folder(args.input_dir, args.output_dir)
+#     align_folder_3(repertoire_sortie_exif, repertoire_sortie_exif_aligne)
 
-    # import argparse
-    # parser = argparse.ArgumentParser(description="Aligne les images d'un dossier pour timelapse.")
-    # parser.add_argument("input_dir", help="Dossier contenant les images originales")
-    # parser.add_argument("output_dir", help="Dossier où sauvegarder les images alignées")
-    # args = parser.parse_args()
-    # align_folder(args.input_dir, args.output_dir)
-    align_folder_3(IMG_DIR, OUTPUT_DIR)
+############################################################
+# CONVERSION TO VIDEO
+
+def photos_to_video_ffmpeg(images_dir, output_file, fps=1):
+    print(f"Conversion des photos dans le répertoire '{images_dir}'…")
+    # Vérifie la présence du dossier
+    if not os.path.isdir(images_dir):
+        print("❌ Le dossier spécifié n'existe pas :", images_dir)
+        sys.exit(1)
+
+    # Vérifie que ffmpeg est installé
+    if subprocess.call(["which", "ffmpeg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        print("❌ ffmpeg n'est pas installé. Installez-le avec :")
+        print("   sudo apt install ffmpeg")
+        sys.exit(1)
+
+    # Crée une liste d’images triée (pour garantir l’ordre)
+    images = sorted([
+        f for f in os.listdir(images_dir)
+        if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
+    ])
+
+    if not images:
+        print("❌ Aucune image trouvée dans le dossier :", images_dir)
+        sys.exit(1)
+
+    # Crée un fichier temporaire listant les images pour ffmpeg
+    list_file = os.path.join("images.txt")
+    with open(list_file, "w") as f:
+        for img in images:
+            f.write(f"file '{os.path.join(images_dir, img)}'\n")
+            # f.write("duration 1\n") # NOTE: incompatible with `-r fps`
+        # dernière image répétée
+        f.write(f"file '{os.path.join(images_dir, images[-1])}'\n")
+
+    print("Fichier temporaire : " + list_file)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", list_file,
+        "-r", str(fps),
+        "-pix_fmt", "yuv420p",
+        output_file
+    ]
+
+    print(f"🎞️ Création de la vidéo '{output_file}' à {fps} fps…")
+    subprocess.run(cmd, check=True)
+    # TODO
+    # os.remove(list_file)
+
+    print(f"✅ Vidéo créée avec succès : {output_file}")
 
 ############################################################
 # MAIN
 
+VIDEO_NAME = "timelapse.mp4"
+FPS = 24
+
 if __name__ == "__main__":
-    main_renommage()
-    # main_alignement_old()
-    # main_alignement()
-    main_alignement_3()
+    # Vérification des arguments
+    if len(sys.argv) < 2:
+        print("Usage : python script.py <repertoire_entree> [prefixe] [repertoire_sortie]")
+        sys.exit(1)
+
+    repertoire_entree = sys.argv[1]
+    prefixe = sys.argv[2] if len(sys.argv) >= 3 else "exif"
+
+    repertoire_sortie_exif = sys.argv[3] if len(sys.argv) >= 4 else repertoire_entree.rstrip("/\\") + "-exif"
+    repertoire_sortie_exif_aligne = repertoire_sortie_exif + "-alignes"
+
+
+    if not os.path.isdir(repertoire_entree):
+        print(f"Erreur : le répertoire d’entrée '{repertoire_entree}' n’existe pas.")
+        sys.exit(1)
+
+    print("\n=== Entrées ===")
+    print(f"Répertoire source                    : {repertoire_entree}")
+    print(f"Préfixe                              : {prefixe}")
+    print(f"Répertoire de sortie EXIF            : {repertoire_sortie_exif}")
+    print(f"Répertoire de sortie EXIF alignement : {repertoire_sortie_exif_aligne}")
+
+    os.makedirs(repertoire_sortie_exif, exist_ok=True)
+
+
+    main_renommage(repertoire_entree, repertoire_sortie_exif)
+        # main_alignement_old()
+        # main_alignement()
+    align_folder_3(repertoire_sortie_exif, repertoire_sortie_exif_aligne)
+    photos_to_video_ffmpeg(repertoire_sortie_exif_aligne, VIDEO_NAME, FPS)
 
 print("Done! :-)")
