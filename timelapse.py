@@ -9,9 +9,10 @@
 import os
 import sys
 import subprocess
+import re
 import shutil
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from PIL.ExifTags import TAGS
 
 import cv2
@@ -21,7 +22,7 @@ from tqdm import tqdm
 
 
 VIDEO_NAME = "timelapse.mp4"
-FPS = 8
+FPS = 12
 
 
 ############################################################
@@ -329,6 +330,66 @@ def reprojection_error(H, src_pts, dst_pts, affine=False):
     err = np.linalg.norm(pred - dst_pts, axis=1)
     return np.median(err)  # ou np.mean(err)
 
+
+
+def ajouter_date_image(chemin_image):
+    # --- 1. Extraire le nom de fichier sans extension ---
+    nom_fichier = os.path.basename(chemin_image)
+
+    # --- 2. Trouver la date au format yyyy-mm-dd ---
+    match = re.search(r"\d{4}-\d{2}-\d{2}", nom_fichier)
+    if not match:
+        print("Aucune date trouvée dans le nom de fichier :", nom_fichier)
+        return
+    date_str = match.group(0)
+
+   # --- 3. Charger l’image et forcer RGBA ---
+    img = Image.open(chemin_image)
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    # --- 4. Police monospace ---
+    try:
+        font = ImageFont.truetype("DejaVuSansMono.ttf", size=max(20, img.height // 25))
+    except IOError:
+        font = ImageFont.load_default()
+
+    # --- 5. Mesure du texte ---
+    draw_tmp = ImageDraw.Draw(img)
+    bbox = draw_tmp.textbbox((0, 0), date_str, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+
+    # --- 6. Position bas droite ---
+    margin = 10
+    x = img.width - text_width - margin
+    y = img.height - text_height - margin
+
+    # --- 7. Créer calque overlay RGBA ---
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw_overlay = ImageDraw.Draw(overlay)
+
+    # Fond semi-transparent
+    draw_overlay.rectangle(
+        [(x - 5, y - 3), (x + text_width + 5, y + text_height + 3)],
+        fill=(0, 0, 0, 150)
+    )
+    # Texte jaune vif
+    draw_overlay.text((x, y), date_str, font=font, fill=(255, 255, 0, 255))
+
+    # --- 8. Fusion des calques ---
+    img_composite = Image.alpha_composite(img, overlay)
+
+    # --- 9. Conversion finale en RGB pour JPEG ---
+    img_final = img_composite.convert("RGB")
+    # sortie = os.path.splitext(chemin_image)[0] + "_date.jpg"
+    # On écrase !
+    sortie = chemin_image
+    img_final.save(sortie, quality=95)
+    print("✅ Image enregistrée :", sortie)
+
+
+
 # TODO: detect aberrations in case none of the 2 alignement methods are accurate enough
 
 def align_images_3(base_img, img_to_align, fname, max_features=5000, good_match_percent=0.15):
@@ -455,7 +516,9 @@ def align_folder_3(input_dir, output_dir):
     print(f"Image de référence : {filenames[0]}")
 
     # Sauvegarder l'image de référence telle quelle
+    # TODO: mieux de d'abord créer l'image puis ajouter le texte, et enfin l'exporter dans un fichier
     cv2.imwrite(os.path.join(output_dir, filenames[0]), ref_img)
+    ajouter_date_image(os.path.join(output_dir, filenames[0]))
 
     # Aligner les autres
     for fname in tqdm(filenames[1:], desc="Alignement des images"):
@@ -465,7 +528,9 @@ def align_folder_3(input_dir, output_dir):
             print(f"⚠️  Impossible de lire {fname}, ignorée.")
             continue
         aligned, _ = align_images_3(ref_img, img, fname)
+        # TODO: mieux de d'abord créer l'image puis ajouter le texte, et enfin l'exporter dans un fichier
         cv2.imwrite(os.path.join(output_dir, fname), aligned)
+        ajouter_date_image(os.path.join(output_dir, fname))
 
     print(f"\n✅ Toutes les images ont été alignées dans : {output_dir}")
 
