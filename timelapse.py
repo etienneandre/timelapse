@@ -22,8 +22,8 @@ from tqdm import tqdm
 
 
 VIDEO_NAME = "timelapse.mp4"
-FPS = 12
-
+# FPS = 4
+DURATION_FRAME = "0.1"
 
 ############################################################
 # PARTIE 1: renommage
@@ -546,7 +546,7 @@ def align_folder_3(input_dir, output_dir):
 ############################################################
 # CONVERSION TO VIDEO
 
-def photos_to_video_ffmpeg(images_dir, output_file, fps=1):
+def photos_to_video_ffmpeg(images_dir, output_file):
     print(f"Conversion des photos dans le répertoire '{images_dir}'…")
     # Vérifie la présence du dossier
     if not os.path.isdir(images_dir):
@@ -574,7 +574,7 @@ def photos_to_video_ffmpeg(images_dir, output_file, fps=1):
     with open(list_file, "w") as f:
         for img in images:
             f.write(f"file '{os.path.join(images_dir, img)}'\n")
-            # f.write("duration 1\n") # NOTE: incompatible with `-r fps`
+            f.write("duration " + DURATION_FRAME + "\n") # NOTE: incompatible with `-r fps`
         # dernière image répétée
         f.write(f"file '{os.path.join(images_dir, images[-1])}'\n")
 
@@ -586,12 +586,12 @@ def photos_to_video_ffmpeg(images_dir, output_file, fps=1):
         "-f", "concat",
         "-safe", "0",
         "-i", list_file,
-        "-r", str(fps),
+        # "-r", str(fps),
         "-pix_fmt", "yuv420p",
         output_file
     ]
 
-    print(f"🎞️ Création de la vidéo '{output_file}' à {fps} fps…")
+    print(f"🎞️ Création de la vidéo '{output_file}' à durée d’image {DURATION_FRAME}s…")
     subprocess.run(cmd, check=True)
     os.remove(list_file)
 
@@ -630,6 +630,6 @@ if __name__ == "__main__":
         # main_alignement_old()
         # main_alignement()
     align_folder_3(repertoire_sortie_exif, repertoire_sortie_exif_aligne)
-    photos_to_video_ffmpeg(repertoire_sortie_exif_aligne, VIDEO_NAME, FPS)
+    photos_to_video_ffmpeg(repertoire_sortie_exif_aligne, VIDEO_NAME)
 
 print("Done! :-)")
