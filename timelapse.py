@@ -20,9 +20,15 @@ import glob #, os
 from tqdm import tqdm
 
 
-repertoire_sortie = ""
+VIDEO_NAME = "timelapse.mp4"
+FPS = 8
 
+
+############################################################
 # PARTIE 1: renommage
+############################################################
+
+# TODO: detect if 2 pictures have the same %Y-%m-%d-%H-%M
 
 def extraire_date_exif(chemin_image):
     """Retourne la date/heure EXIF sous forme de datetime, ou None si introuvable."""
@@ -83,231 +89,229 @@ def main_renommage(repertoire_entree, repertoire_sortie):
     print(f"Fichiers enregistrés dans      : {repertoire_sortie}")
 
 
-# PARTIE 2: alignement
 
-
-# === Réglages ===
-MAX_FEATURES = 5000
-RATIO_TEST = 0.75       # ratio pour knnMatch
-MIN_MATCH_COUNT = 8     # nombre minimal de correspondances fiables pour homographie
-N_AVG = 20   # nombre d’images utilisées pour calculer la moyenne
-
-############################################################
-# VERSION 1
-
-def align_images_old(im, im_ref):
-    """
-    Aligne im sur im_ref.
-    Retourne (im_aligned, H) où H est la transformation (3x3) appliquée à im.
-    Si échec, renvoie im (non modifiée) et la matrice identité.
-    """
-    im1_gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-    im2_gray = cv2.cvtColor(im_ref, cv2.COLOR_BGR2GRAY)
-
-    # Détecteur / descripteur ORB
-    orb = cv2.ORB_create(MAX_FEATURES)
-    kp1, des1 = orb.detectAndCompute(im1_gray, None)
-    kp2, des2 = orb.detectAndCompute(im2_gray, None)
-
-    # Si pas de descripteurs, on renvoie l'image d'origine
-    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-        H = np.eye(3, dtype=np.float32)
-        return im.copy(), H
-
-    # Matcher BF Hamming (pour ORB)
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-
-    # knnMatch + ratio test
-    knn_matches = bf.knnMatch(des1, des2, k=2)
-    good_matches = []
-    for m_n in knn_matches:
-        if len(m_n) != 2:
-            continue
-        m, n = m_n
-        if m.distance < RATIO_TEST * n.distance:
-            good_matches.append(m)
-
-    if len(good_matches) >= MIN_MATCH_COUNT:
-        # Extraire points
-        pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-        pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-
-        # Homographie robuste
-        H, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
-        if H is not None:
-            h, w = im_ref.shape[:2]
-            im1_reg = cv2.warpPerspective(im, H, (w, h))
-            return im1_reg, H
-
-    # Si pas assez de bonnes correspondances pour homographie, essayer une transformation affine partielle
-    # On retente en utilisant estimation affine sur toutes les bonnes matches (même si moins)
-    if len(good_matches) >= 4:
-        pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-        pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-        M, inliers = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC)
-        if M is not None:
-            # convertir affine 2x3 en 3x3
-            H_aff = np.vstack([M, [0,0,1]])
-            h, w = im_ref.shape[:2]
-            im1_reg = cv2.warpAffine(im, M, (w, h))
-            return im1_reg, H_aff
-
-    # Sinon fallback: renvoyer image inchangée et identité
-    return im.copy(), np.eye(3, dtype=np.float32)
-
-# === Traitement ===
-def main_alignement_old():
-    IMG_DIR = repertoire_sortie
-    OUTPUT_DIR = IMG_DIR + "-alignes"
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    files = sorted(glob.glob(os.path.join(IMG_DIR, "*.jpg")))
-    if not files:
-        raise SystemExit("Aucune image trouvée dans " + IMG_DIR)
-
-
-    print(f"[INFO] Alignement de {len(files)} images…")
-    ref = cv2.imread(files[0])
-    aligned_images = [(files[0], ref)]
-
-    for f in tqdm(files[1:], desc="Alignement"):
-        im = cv2.imread(f)
-        aligned, _ = align_images_old(im, ref)
-        aligned_images.append((f, aligned))
-
-    # # Calcul du recadrage commun (utiliser logical_and.reduce pour robustesse)
-    # print("[INFO] Calcul du cadrage commun…")
-    # masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for img in aligned_images]
-    # common_mask = np.logical_and.reduce(masks).astype(np.uint8)
-    # ys, xs = np.where(common_mask)
-    # if ys.size == 0 or xs.size == 0:
-    #     raise SystemExit("Intersection vide — les images sont trop décalées après alignement.")
-    # ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
-
-    # === 4. Calcul du recadrage commun ===
-    print("[INFO] Calcul du cadrage commun (zone non noire)…")
-    masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for _, img in aligned_images]
-    common_mask = np.logical_and.reduce(masks).astype(np.uint8)
-    ys, xs = np.where(common_mask)
-    if ys.size == 0 or xs.size == 0:
-        raise SystemExit("Intersection vide — les images sont trop décalées après alignement.")
-    ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
-
-    # === 5. Sauvegarde des images alignées ===
-    print("[INFO] Sauvegarde des images alignées…")
-    for orig_path, img in aligned_images:
-        filename = os.path.basename(orig_path)
-        cropped = img[ymin:ymax+1, xmin:xmax+1]
-        outpath = os.path.join(OUTPUT_DIR, filename)
-        cv2.imwrite(outpath, cropped)
-
-    # cropped_images = [img[ymin:ymax+1, xmin:xmax+1] for img in aligned_images]
-    #
-    # print("[INFO] Sauvegarde des images alignées…")
-    # for i, img in enumerate(cropped_images):
-    #     outpath = os.path.join(OUTPUT_DIR, f"frame_{i:04d}.jpg")
-    #     cv2.imwrite(outpath, img)
-
-    # print("[INFO] Création de la vidéo finale avec framerate " + FPS + "…")
-    # os.system(f"ffmpeg -y -framerate {FPS} -i {OUTPUT_DIR}/frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p {VIDEO_NAME}")
-    # print(f"[OK] Vidéo créée : {VIDEO_NAME}")
-
-############################################################
-# VERSION 2
-
-# === Traitement ===
-def main_alignement():
-    # global repertoire_sortie
-    IMG_DIR = repertoire_sortie
-    OUTPUT_DIR = IMG_DIR + "-alignes"
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    files = sorted(glob.glob(os.path.join(IMG_DIR, "*.jpg")))
-    if not files:
-        raise SystemExit(f"Aucune image trouvée dans {IMG_DIR}")
-
-    # === 1. Calcul de l’image de référence moyenne ===
-    print(f"[INFO] Calcul de l’image moyenne à partir des {min(N_AVG, len(files))} premières images…")
-    subset = files[:N_AVG]
-    imgs = []
-    for f in subset:
-        im = cv2.imread(f).astype(np.float32)
-        imgs.append(im)
-    avg_ref = np.mean(imgs, axis=0).astype(np.uint8)
-    ref_gray = cv2.cvtColor(avg_ref, cv2.COLOR_BGR2GRAY)
-
-    # Sauvegarde optionnelle pour vérifier la référence
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "_reference_average.jpg"), avg_ref)
-
-    # === 2. Fonction d’alignement (inchangée sauf ref passée en paramètre) ===
-    def align_images(im, im_ref_gray):
-        im1_gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        orb = cv2.ORB_create(MAX_FEATURES)
-        kp1, des1 = orb.detectAndCompute(im1_gray, None)
-        kp2, des2 = orb.detectAndCompute(im_ref_gray, None)
-
-        if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-            return im.copy(), np.eye(3, dtype=np.float32)
-
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        knn_matches = bf.knnMatch(des1, des2, k=2)
-        good_matches = []
-        for m_n in knn_matches:
-            if len(m_n) != 2:
-                continue
-            m, n = m_n
-            if m.distance < RATIO_TEST * n.distance:
-                good_matches.append(m)
-
-        if len(good_matches) >= MIN_MATCH_COUNT:
-            pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-            pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-            H, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
-            if H is not None:
-                h, w = im_ref_gray.shape[:2]
-                im1_reg = cv2.warpPerspective(im, H, (w, h))
-                return im1_reg, H
-
-        # Fallback affine
-        if len(good_matches) >= 4:
-            pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-            pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-            M, inliers = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC)
-            if M is not None:
-                h, w = im_ref_gray.shape[:2]
-                im1_reg = cv2.warpAffine(im, M, (w, h))
-                H_aff = np.vstack([M, [0, 0, 1]])
-                return im1_reg, H_aff
-
-        # Si rien ne marche
-        return im.copy(), np.eye(3, dtype=np.float32)
-
-    # === 3. Alignement de toutes les images sur l’image moyenne ===
-    print(f"[INFO] Alignement de {len(files)} images sur la référence moyenne…")
-    aligned_images = []
-    for f in tqdm(files, desc="Alignement"):
-        im = cv2.imread(f)
-        aligned, _ = align_images(im, ref_gray)
-        aligned_images.append((f, aligned))
-
-    # === 4. Calcul du recadrage commun ===
-    print("[INFO] Calcul du cadrage commun (zone non noire)…")
-    masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for _, img in aligned_images]
-    common_mask = np.logical_and.reduce(masks).astype(np.uint8)
-    ys, xs = np.where(common_mask)
-    if ys.size == 0 or xs.size == 0:
-        raise SystemExit("Intersection vide — les images sont trop décalées après alignement.")
-    ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
-
-    # === 5. Sauvegarde des images alignées ===
-    print("[INFO] Sauvegarde des images alignées…")
-    for orig_path, img in aligned_images:
-        filename = os.path.basename(orig_path)
-        cropped = img[ymin:ymax+1, xmin:xmax+1]
-        outpath = os.path.join(OUTPUT_DIR, filename)
-        cv2.imwrite(outpath, cropped)
+# # === Réglages ===
+# MAX_FEATURES = 5000
+# RATIO_TEST = 0.75       # ratio pour knnMatch
+# MIN_MATCH_COUNT = 8     # nombre minimal de correspondances fiables pour homographie
+# N_AVG = 20   # nombre d’images utilisées pour calculer la moyenne
+#
+# ############################################################
+# # VERSION 1
+#
+# def align_images_old(im, im_ref):
+#     """
+#     Aligne im sur im_ref.
+#     Retourne (im_aligned, H) où H est la transformation (3x3) appliquée à im.
+#     Si échec, renvoie im (non modifiée) et la matrice identité.
+#     """
+#     im1_gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+#     im2_gray = cv2.cvtColor(im_ref, cv2.COLOR_BGR2GRAY)
+#
+#     # Détecteur / descripteur ORB
+#     orb = cv2.ORB_create(MAX_FEATURES)
+#     kp1, des1 = orb.detectAndCompute(im1_gray, None)
+#     kp2, des2 = orb.detectAndCompute(im2_gray, None)
+#
+#     # Si pas de descripteurs, on renvoie l'image d'origine
+#     if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+#         H = np.eye(3, dtype=np.float32)
+#         return im.copy(), H
+#
+#     # Matcher BF Hamming (pour ORB)
+#     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+#
+#     # knnMatch + ratio test
+#     knn_matches = bf.knnMatch(des1, des2, k=2)
+#     good_matches = []
+#     for m_n in knn_matches:
+#         if len(m_n) != 2:
+#             continue
+#         m, n = m_n
+#         if m.distance < RATIO_TEST * n.distance:
+#             good_matches.append(m)
+#
+#     if len(good_matches) >= MIN_MATCH_COUNT:
+#         # Extraire points
+#         pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+#         pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+#
+#         # Homographie robuste
+#         H, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
+#         if H is not None:
+#             h, w = im_ref.shape[:2]
+#             im1_reg = cv2.warpPerspective(im, H, (w, h))
+#             return im1_reg, H
+#
+#     # Si pas assez de bonnes correspondances pour homographie, essayer une transformation affine partielle
+#     # On retente en utilisant estimation affine sur toutes les bonnes matches (même si moins)
+#     if len(good_matches) >= 4:
+#         pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+#         pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+#         M, inliers = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC)
+#         if M is not None:
+#             # convertir affine 2x3 en 3x3
+#             H_aff = np.vstack([M, [0,0,1]])
+#             h, w = im_ref.shape[:2]
+#             im1_reg = cv2.warpAffine(im, M, (w, h))
+#             return im1_reg, H_aff
+#
+#     # Sinon fallback: renvoyer image inchangée et identité
+#     return im.copy(), np.eye(3, dtype=np.float32)
+#
+# # === Traitement ===
+# def main_alignement_old():
+#     IMG_DIR = repertoire_sortie
+#     OUTPUT_DIR = IMG_DIR + "-alignes"
+#
+#     os.makedirs(OUTPUT_DIR, exist_ok=True)
+#
+#     files = sorted(glob.glob(os.path.join(IMG_DIR, "*.jpg")))
+#     if not files:
+#         raise SystemExit("Aucune image trouvée dans " + IMG_DIR)
+#
+#
+#     print(f"[INFO] Alignement de {len(files)} images…")
+#     ref = cv2.imread(files[0])
+#     aligned_images = [(files[0], ref)]
+#
+#     for f in tqdm(files[1:], desc="Alignement"):
+#         im = cv2.imread(f)
+#         aligned, _ = align_images_old(im, ref)
+#         aligned_images.append((f, aligned))
+#
+#     # # Calcul du recadrage commun (utiliser logical_and.reduce pour robustesse)
+#     # print("[INFO] Calcul du cadrage commun…")
+#     # masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for img in aligned_images]
+#     # common_mask = np.logical_and.reduce(masks).astype(np.uint8)
+#     # ys, xs = np.where(common_mask)
+#     # if ys.size == 0 or xs.size == 0:
+#     #     raise SystemExit("Intersection vide — les images sont trop décalées après alignement.")
+#     # ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
+#
+#     # === 4. Calcul du recadrage commun ===
+#     print("[INFO] Calcul du cadrage commun (zone non noire)…")
+#     masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for _, img in aligned_images]
+#     common_mask = np.logical_and.reduce(masks).astype(np.uint8)
+#     ys, xs = np.where(common_mask)
+#     if ys.size == 0 or xs.size == 0:
+#         raise SystemExit("Intersection vide — les images sont trop décalées après alignement.")
+#     ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
+#
+#     # === 5. Sauvegarde des images alignées ===
+#     print("[INFO] Sauvegarde des images alignées…")
+#     for orig_path, img in aligned_images:
+#         filename = os.path.basename(orig_path)
+#         cropped = img[ymin:ymax+1, xmin:xmax+1]
+#         outpath = os.path.join(OUTPUT_DIR, filename)
+#         cv2.imwrite(outpath, cropped)
+#
+#     # cropped_images = [img[ymin:ymax+1, xmin:xmax+1] for img in aligned_images]
+#     #
+#     # print("[INFO] Sauvegarde des images alignées…")
+#     # for i, img in enumerate(cropped_images):
+#     #     outpath = os.path.join(OUTPUT_DIR, f"frame_{i:04d}.jpg")
+#     #     cv2.imwrite(outpath, img)
+#
+#     # print("[INFO] Création de la vidéo finale avec framerate " + FPS + "…")
+#     # os.system(f"ffmpeg -y -framerate {FPS} -i {OUTPUT_DIR}/frame_%04d.jpg -c:v libx264 -pix_fmt yuv420p {VIDEO_NAME}")
+#     # print(f"[OK] Vidéo créée : {VIDEO_NAME}")
+#
+# ############################################################
+# # VERSION 2
+#
+# # === Traitement ===
+# def main_alignement():
+#     # global repertoire_sortie
+#     IMG_DIR = repertoire_sortie
+#     OUTPUT_DIR = IMG_DIR + "-alignes"
+#
+#     os.makedirs(OUTPUT_DIR, exist_ok=True)
+#
+#     files = sorted(glob.glob(os.path.join(IMG_DIR, "*.jpg")))
+#     if not files:
+#         raise SystemExit(f"Aucune image trouvée dans {IMG_DIR}")
+#
+#     # === 1. Calcul de l’image de référence moyenne ===
+#     print(f"[INFO] Calcul de l’image moyenne à partir des {min(N_AVG, len(files))} premières images…")
+#     subset = files[:N_AVG]
+#     imgs = []
+#     for f in subset:
+#         im = cv2.imread(f).astype(np.float32)
+#         imgs.append(im)
+#     avg_ref = np.mean(imgs, axis=0).astype(np.uint8)
+#     ref_gray = cv2.cvtColor(avg_ref, cv2.COLOR_BGR2GRAY)
+#
+#     # Sauvegarde optionnelle pour vérifier la référence
+#     cv2.imwrite(os.path.join(OUTPUT_DIR, "_reference_average.jpg"), avg_ref)
+#
+#     # === 2. Fonction d’alignement (inchangée sauf ref passée en paramètre) ===
+#     def align_images(im, im_ref_gray):
+#         im1_gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+#         orb = cv2.ORB_create(MAX_FEATURES)
+#         kp1, des1 = orb.detectAndCompute(im1_gray, None)
+#         kp2, des2 = orb.detectAndCompute(im_ref_gray, None)
+#
+#         if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+#             return im.copy(), np.eye(3, dtype=np.float32)
+#
+#         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+#         knn_matches = bf.knnMatch(des1, des2, k=2)
+#         good_matches = []
+#         for m_n in knn_matches:
+#             if len(m_n) != 2:
+#                 continue
+#             m, n = m_n
+#             if m.distance < RATIO_TEST * n.distance:
+#                 good_matches.append(m)
+#
+#         if len(good_matches) >= MIN_MATCH_COUNT:
+#             pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+#             pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+#             H, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
+#             if H is not None:
+#                 h, w = im_ref_gray.shape[:2]
+#                 im1_reg = cv2.warpPerspective(im, H, (w, h))
+#                 return im1_reg, H
+#
+#         # Fallback affine
+#         if len(good_matches) >= 4:
+#             pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+#             pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+#             M, inliers = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC)
+#             if M is not None:
+#                 h, w = im_ref_gray.shape[:2]
+#                 im1_reg = cv2.warpAffine(im, M, (w, h))
+#                 H_aff = np.vstack([M, [0, 0, 1]])
+#                 return im1_reg, H_aff
+#
+#         # Si rien ne marche
+#         return im.copy(), np.eye(3, dtype=np.float32)
+#
+#     # === 3. Alignement de toutes les images sur l’image moyenne ===
+#     print(f"[INFO] Alignement de {len(files)} images sur la référence moyenne…")
+#     aligned_images = []
+#     for f in tqdm(files, desc="Alignement"):
+#         im = cv2.imread(f)
+#         aligned, _ = align_images(im, ref_gray)
+#         aligned_images.append((f, aligned))
+#
+#     # === 4. Calcul du recadrage commun ===
+#     print("[INFO] Calcul du cadrage commun (zone non noire)…")
+#     masks = [(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) > 0) for _, img in aligned_images]
+#     common_mask = np.logical_and.reduce(masks).astype(np.uint8)
+#     ys, xs = np.where(common_mask)
+#     if ys.size == 0 or xs.size == 0:
+#         raise SystemExit("Intersection vide — les images sont trop décalées après alignement.")
+#     ymin, ymax, xmin, xmax = ys.min(), ys.max(), xs.min(), xs.max()
+#
+#     # === 5. Sauvegarde des images alignées ===
+#     print("[INFO] Sauvegarde des images alignées…")
+#     for orig_path, img in aligned_images:
+#         filename = os.path.basename(orig_path)
+#         cropped = img[ymin:ymax+1, xmin:xmax+1]
+#         outpath = os.path.join(OUTPUT_DIR, filename)
+#         cv2.imwrite(outpath, cropped)
 
 ############################################################
 # VERSION 3
@@ -325,6 +329,7 @@ def reprojection_error(H, src_pts, dst_pts, affine=False):
     err = np.linalg.norm(pred - dst_pts, axis=1)
     return np.median(err)  # ou np.mean(err)
 
+# TODO: detect aberrations in case none of the 2 alignement methods are accurate enough
 
 def align_images_3(base_img, img_to_align, fname, max_features=5000, good_match_percent=0.15):
     """Aligne img_to_align sur base_img via détection de points clés (ORB) et homographie."""
@@ -523,16 +528,12 @@ def photos_to_video_ffmpeg(images_dir, output_file, fps=1):
 
     print(f"🎞️ Création de la vidéo '{output_file}' à {fps} fps…")
     subprocess.run(cmd, check=True)
-    # TODO
-    # os.remove(list_file)
+    os.remove(list_file)
 
     print(f"✅ Vidéo créée avec succès : {output_file}")
 
 ############################################################
 # MAIN
-
-VIDEO_NAME = "timelapse.mp4"
-FPS = 24
 
 if __name__ == "__main__":
     # Vérification des arguments
